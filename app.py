@@ -620,7 +620,7 @@ def dispatch_request(path, method, body=b""):
     clean_path = parsed.path.rstrip("/") if len(parsed.path) > 1 else (parsed.path or "/")
 
     # Root / Static HTML
-    if clean_path in ("", "/", "/index.html", "/index.py", "/api/index.py", "/api"):
+    if method in ("GET", "HEAD") and clean_path in ("", "/", "/index.html", "/index.py", "/api/index.py", "/api"):
         for candidate_dir in [
             WEB_DIR,
             os.path.join(BASE_DIR, "web"),
@@ -1021,7 +1021,21 @@ class AppRequestHandler(BaseHTTPRequestHandler):
 # WSGI Application (Vercel Serverless, Gunicorn, uWSGI)
 def wsgi_app(environ, start_response):
     try:
-        raw_path = environ.get("HTTP_X_MATCHED_PATH") or environ.get("HTTP_X_FORWARDED_URI") or environ.get("PATH_INFO") or "/"
+        # Check query parameters for explicit route forwarding (from vercel.json)
+        qs = environ.get("QUERY_STRING", "")
+        query_params = urllib.parse.parse_qs(qs)
+        if "__route__" in query_params:
+            raw_path = query_params["__route__"][0]
+        elif "path" in query_params:
+            raw_path = query_params["path"][0]
+        else:
+            raw_path = (
+                environ.get("HTTP_X_MATCHED_PATH")
+                or environ.get("HTTP_X_FORWARDED_PATH")
+                or environ.get("HTTP_X_FORWARDED_URI")
+                or environ.get("PATH_INFO")
+                or "/"
+            )
         parsed = urllib.parse.urlparse(raw_path)
         path = parsed.path or "/"
         method = environ.get("REQUEST_METHOD", "GET").upper()
