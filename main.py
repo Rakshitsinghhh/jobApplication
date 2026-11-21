@@ -5,25 +5,28 @@ Entry point for launching the Web UI or optional CLI mode.
 """
 
 import sys
-import app
+from app import AppRequestHandler, start_server, load_config
 
 # ============================================================
-# DRY RUN TOGGLE
-# If True : DRY RUN mode (simulates everything, no real emails sent)
-# If False: FINAL MAILING mode (sends real emails via Gmail SMTP)
+# VERCEL / SERVERLESS ENTRYPOINTS
+# Vercel scans root .py files and requires a top-level
+# "app", "application", or "handler" variable.
 # ============================================================
+handler = AppRequestHandler
+app = AppRequestHandler
+application = AppRequestHandler
+
 DRY_RUN = False
-app.DRY_RUN = DRY_RUN
+
 
 def main():
     if "--cli" in sys.argv:
         print("Launching in CLI mode...")
-        # Optional CLI fallback if requested
-        cfg = app.load_config()
+        cfg = load_config()
         print(f"Loaded configuration for {cfg.get('sender_email')}")
     else:
-        # Launch modern interactive web application
-        app.start_server(auto_open=True)
+        start_server(auto_open=True)
+
 
 if __name__ == "__main__":
     main()

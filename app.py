@@ -24,9 +24,40 @@ from openpyxl import load_workbook
 # Base directories
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
-DB_PATH = os.path.join(BASE_DIR, "campaigns.db")
-LOG_PATH = os.path.join(BASE_DIR, "sent_log.txt")
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+
+# Serverless & Read-Only Filesystem Safe Storage
+def get_writable_dir():
+    if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        return "/tmp"
+    try:
+        test_path = os.path.join(BASE_DIR, ".write_test")
+        with open(test_path, "w") as f:
+            f.write("1")
+        os.remove(test_path)
+        return BASE_DIR
+    except Exception:
+        return "/tmp"
+
+DATA_DIR = get_writable_dir()
+DB_PATH = os.path.join(DATA_DIR, "campaigns.db")
+LOG_PATH = os.path.join(DATA_DIR, "sent_log.txt")
+CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+
+# If running on serverless (/tmp), clone initial DB & config from project root if present
+if DATA_DIR != BASE_DIR:
+    import shutil
+    base_db = os.path.join(BASE_DIR, "campaigns.db")
+    if os.path.exists(base_db) and not os.path.exists(DB_PATH):
+        try:
+            shutil.copy2(base_db, DB_PATH)
+        except Exception:
+            pass
+    base_cfg = os.path.join(BASE_DIR, "config.json")
+    if os.path.exists(base_cfg) and not os.path.exists(CONFIG_PATH):
+        try:
+            shutil.copy2(base_cfg, CONFIG_PATH)
+        except Exception:
+            pass
 
 # ============================================================
 # DRY RUN TOGGLE
@@ -607,7 +638,7 @@ class AppRequestHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        if path in ("/", "/index.html"):
+        if path in ("/", "/index.html", "/api/index.py", "/api"):
             index_path = os.path.join(WEB_DIR, "index.html")
             if os.path.exists(index_path):
                 with open(index_path, "rb") as f:
@@ -1050,6 +1081,16 @@ def start_server(port=None, host=None, auto_open=True):
     except KeyboardInterrupt:
         print("\nStopping server...")
         server.server_close()
+
+
+# ============================================================
+# VERCEL / SERVERLESS / WSGI ENTRYPOINTS
+# Vercel scans Python files for top-level "app", "application",
+# or "handler" (BaseHTTPRequestHandler subclass)
+# ============================================================
+handler = AppRequestHandler
+app = AppRequestHandler
+application = AppRequestHandler
 
 
 if __name__ == "__main__":

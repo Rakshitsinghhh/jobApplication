@@ -52,7 +52,13 @@ Open your browser at: **`http://localhost:5000`**
 
 Check Box is designed to be deployed online as a shared web tool. Any user opening your deployed URL can enter their own Gmail and App Password into the UI modal to run their campaigns.
 
-### Deploying to Render
+### Deploying to Vercel
+1. Push your repository to GitHub or GitLab.
+2. In [Vercel Dashboard](https://vercel.com/new), import your repository.
+3. Vercel automatically detects the Python runtime, `vercel.json`, and `api/index.py`. Click **Deploy**.
+> **⚠️ Serverless Note for Vercel**: Vercel Serverless Functions have a 10–15 second maximum execution timeout on free hobby tiers and freeze background worker threads when HTTP responses finish. If you plan to send large campaigns (50–100+ emails) with the recommended 3–4s anti-spam buffer delays (which take several minutes), we strongly recommend deploying to **Render** (free persistent web service), **Railway**, or **Docker** so background workers run uninterrupted.
+
+### Deploying to Render (Recommended for Background Workers)
 1. Push your repository to GitHub or GitLab.
 2. In [Render Dashboard](https://dashboard.render.com), click **New +** > **Web Service**.
 3. Connect your repository.
