@@ -1,12 +1,4 @@
 {
-  "functions": {
-    "api/index.py": {
-      "includeFiles": "{web/**,*.xlsx,config.json,campaigns.db}"
-    },
-    "app.py": {
-      "includeFiles": "{web/**,*.xlsx,config.json,campaigns.db}"
-    }
-  },
   "rewrites": [
     {
       "source": "/(.*)",

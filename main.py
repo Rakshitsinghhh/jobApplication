@@ -5,16 +5,7 @@ Entry point for launching the Web UI or optional CLI mode.
 """
 
 import sys
-from app import AppRequestHandler, start_server, load_config
-
-# ============================================================
-# VERCEL / SERVERLESS ENTRYPOINTS
-# Vercel scans root .py files and requires a top-level
-# "app", "application", or "handler" variable.
-# ============================================================
-handler = AppRequestHandler
-app = AppRequestHandler
-application = AppRequestHandler
+from app import app, application, handler, AppRequestHandler, start_server, load_config
 
 DRY_RUN = False
 

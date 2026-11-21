@@ -610,62 +610,53 @@ def send_campaign_worker(campaign_id, config, subject_tpl, body_tpl, recipients,
         manager.finish("completed", f"🎉 Campaign completed! Successfully delivered {sent_count}/{total} emails.")
 
 
-# HTTP Server Handler
-class AppRequestHandler(BaseHTTPRequestHandler):
-    current_attachment = None  # { filename, bytes, subtype }
+# Current Attachment State
+CURRENT_ATTACHMENT = None
 
-    def log_message(self, format, *args):
-        # Silence default stderr logging for clean console
-        return
 
-    def send_json(self, data, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode("utf-8"))
+def dispatch_request(path, method, body=b""):
+    global CURRENT_ATTACHMENT
+    parsed = urllib.parse.urlparse(path)
+    clean_path = parsed.path.rstrip("/") if len(parsed.path) > 1 else (parsed.path or "/")
 
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+    # Root / Static HTML
+    if clean_path in ("", "/", "/index.html", "/index.py", "/api/index.py", "/api"):
+        for candidate_dir in [
+            WEB_DIR,
+            os.path.join(BASE_DIR, "web"),
+            os.path.join(os.getcwd(), "web"),
+            "/var/task/web"
+        ]:
+            idx_file = os.path.join(candidate_dir, "index.html")
+            if os.path.exists(idx_file):
+                try:
+                    with open(idx_file, "rb") as f:
+                        return 200, [("Content-Type", "text/html; charset=utf-8")], f.read()
+                except Exception as e:
+                    return 500, [("Content-Type", "text/plain; charset=utf-8")], f"Error reading UI file: {e}".encode()
+        return 404, [("Content-Type", "text/plain; charset=utf-8")], b"UI file not found."
 
-    def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
+    # CORS Pre-flight
+    if method == "OPTIONS":
+        return 200, [
+            ("Access-Control-Allow-Origin", "*"),
+            ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+            ("Access-Control-Allow-Headers", "Content-Type")
+        ], b""
 
-        if path in ("/", "/index.html", "/api/index.py", "/api"):
-            index_path = os.path.join(WEB_DIR, "index.html")
-            if os.path.exists(index_path):
-                with open(index_path, "rb") as f:
-                    content = f.read()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(content)
-            else:
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b"UI file not found.")
-            return
-
-        if path == "/api/config":
+    # GET Routes
+    if method == "GET":
+        if clean_path == "/api/config":
             cfg = load_config()
-            cfg["has_attachment"] = bool(AppRequestHandler.current_attachment)
-            cfg["attachment_name"] = AppRequestHandler.current_attachment.get("filename") if AppRequestHandler.current_attachment else ""
-            self.send_json(cfg)
-            return
+            cfg["has_attachment"] = bool(CURRENT_ATTACHMENT)
+            cfg["attachment_name"] = CURRENT_ATTACHMENT.get("filename") if CURRENT_ATTACHMENT else ""
+            return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps(cfg).encode()
 
-        if path == "/api/status":
+        if clean_path == "/api/status":
             with manager.lock:
-                self.send_json(manager.status)
-            return
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps(manager.status).encode()
 
-        if path == "/api/templates":
+        if clean_path == "/api/templates":
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             rows = c.execute("SELECT id, name, subject, body, is_default FROM templates ORDER BY id ASC").fetchall()
@@ -674,10 +665,9 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 {"id": r[0], "name": r[1], "subject": r[2], "body": r[3], "is_default": bool(r[4])}
                 for r in rows
             ]
-            self.send_json({"templates": templates})
-            return
+            return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"templates": templates}).encode()
 
-        if path == "/api/campaigns":
+        if clean_path == "/api/campaigns":
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             rows = c.execute("""
@@ -685,33 +675,24 @@ class AppRequestHandler(BaseHTTPRequestHandler):
             FROM campaigns ORDER BY id DESC LIMIT 50
             """).fetchall()
             conn.close()
+            campaigns = [
+                {
+                    "id": r[0], "title": r[1], "created_at": r[2], "source_type": r[3],
+                    "source_name": r[4], "subject": r[5], "body_template": r[6],
+                    "total_recipients": r[7], "sent_count": r[8], "status": r[9]
+                }
+                for r in rows
+            ]
+            return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"campaigns": campaigns}).encode()
 
-            campaigns = []
-            for r in rows:
-                campaigns.append({
-                    "id": r[0],
-                    "title": r[1],
-                    "created_at": r[2],
-                    "source_type": r[3],
-                    "source_name": r[4],
-                    "subject": r[5],
-                    "body_template": r[6],
-                    "total_recipients": r[7],
-                    "sent_count": r[8],
-                    "status": r[9]
-                })
-            self.send_json({"campaigns": campaigns})
-            return
-
-        if path.startswith("/api/campaigns/"):
-            camp_id = path.split("/")[-1]
+        if clean_path.startswith("/api/campaigns/"):
+            camp_id = clean_path.split("/")[-1]
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             camp = c.execute("""
             SELECT id, title, created_at, source_type, source_name, subject, body_template, total_recipients, sent_count, status
             FROM campaigns WHERE id = ?
             """, (camp_id,)).fetchone()
-
             recipients = []
             if camp:
                 recs = c.execute("""
@@ -720,66 +701,46 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 """, (camp_id,)).fetchall()
                 for rc in recs:
                     recipients.append({
-                        "email": rc[0],
-                        "name": rc[1],
+                        "email": rc[0], "name": rc[1],
                         "data": json.loads(rc[2]) if rc[2] else {},
-                        "status": rc[3],
-                        "sent_at": rc[4]
+                        "status": rc[3], "sent_at": rc[4]
                     })
             conn.close()
-
             if camp:
-                self.send_json({
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({
                     "campaign": {
-                        "id": camp[0],
-                        "title": camp[1],
-                        "created_at": camp[2],
-                        "source_type": camp[3],
-                        "source_name": camp[4],
-                        "subject": camp[5],
-                        "body_template": camp[6],
-                        "total_recipients": camp[7],
-                        "sent_count": camp[8],
-                        "status": camp[9]
+                        "id": camp[0], "title": camp[1], "created_at": camp[2], "source_type": camp[3],
+                        "source_name": camp[4], "subject": camp[5], "body_template": camp[6],
+                        "total_recipients": camp[7], "sent_count": camp[8], "status": camp[9]
                     },
                     "recipients": recipients
-                })
+                }).encode()
             else:
-                self.send_json({"error": "Campaign not found"}, status=404)
-            return
+                return 404, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": "Campaign not found"}).encode()
 
-        self.send_response(404)
-        self.end_headers()
-
-    def do_POST(self):
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
-
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
-
-        if path == "/api/config":
+    # POST Routes
+    if method == "POST":
+        if clean_path == "/api/config":
             try:
                 data = json.loads(body)
                 save_config(data)
-                self.send_json({"success": True, "config": load_config()})
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"success": True, "config": load_config()}).encode()
             except Exception as e:
-                self.send_json({"error": str(e)}, status=400)
-            return
+                return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": str(e)}).encode()
 
-        if path == "/api/parse-google-sheet":
+        if clean_path == "/api/parse-google-sheet":
             try:
                 data = json.loads(body)
                 sheet_url = data.get("url", "").strip()
                 if not sheet_url:
-                    return self.send_json({"error": "Google Sheet URL is required"}, status=400)
+                    return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": "Google Sheet URL is required"}).encode()
 
                 raw_headers, clean_keys, records = fetch_google_sheet(sheet_url)
                 if not records:
-                    return self.send_json({"error": "No records found in Google Sheet"}, status=400)
+                    return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": "No records found in Google Sheet"}).encode()
 
                 fields = identify_fields(clean_keys, records)
-                self.send_json({
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({
                     "success": True,
                     "source": "google_sheet",
                     "source_name": sheet_url,
@@ -789,33 +750,32 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                     "total_rows": len(records),
                     "sample": records[:5],
                     "all_records": records
-                })
+                }).encode()
             except Exception as e:
-                self.send_json({"error": f"Failed to fetch Google Sheet: {e}. Please ensure link sharing is set to 'Anyone with the link can view'."}, status=400)
-            return
+                return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({
+                    "error": f"Failed to fetch Google Sheet: {e}. Please ensure link sharing is set to 'Anyone with the link can view'."
+                }).encode()
 
-        if path == "/api/parse-excel":
+        if clean_path == "/api/parse-excel":
             try:
                 data = json.loads(body)
                 file_b64 = data.get("file_base64", "")
                 filename = data.get("filename", "upload.xlsx")
-
                 if file_b64:
                     file_bytes = base64.b64decode(file_b64)
                     raw_headers, clean_keys, records = parse_excel_file(file_bytes)
                 elif os.path.exists(os.path.join(BASE_DIR, filename)):
-                    # Load from workspace file
                     with open(os.path.join(BASE_DIR, filename), "rb") as f:
                         file_bytes = f.read()
                     raw_headers, clean_keys, records = parse_excel_file(file_bytes)
                 else:
-                    return self.send_json({"error": "No Excel file provided or found"}, status=400)
+                    return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": "No Excel file provided or found"}).encode()
 
                 if not records:
-                    return self.send_json({"error": "No data rows found in Excel sheet"}, status=400)
+                    return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": "No data rows found in Excel sheet"}).encode()
 
                 fields = identify_fields(clean_keys, records)
-                self.send_json({
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({
                     "success": True,
                     "source": "excel",
                     "source_name": filename,
@@ -825,41 +785,37 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                     "total_rows": len(records),
                     "sample": records[:5],
                     "all_records": records
-                })
+                }).encode()
             except Exception as e:
-                self.send_json({"error": f"Failed to parse Excel file: {e}"}, status=400)
-            return
+                return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": f"Failed to parse Excel file: {e}"}).encode()
 
-        if path == "/api/upload-attachment":
+        if clean_path == "/api/upload-attachment":
             try:
                 data = json.loads(body)
                 filename = data.get("filename", "attachment")
                 file_b64 = data.get("file_base64", "")
                 if file_b64:
-                    AppRequestHandler.current_attachment = {
+                    CURRENT_ATTACHMENT = {
                         "filename": filename,
                         "bytes": base64.b64decode(file_b64),
                         "subtype": "pdf" if filename.lower().endswith(".pdf") else "octet-stream"
                     }
-                    self.send_json({"success": True, "filename": filename})
+                    return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"success": True, "filename": filename}).encode()
                 else:
-                    self.send_json({"error": "Empty attachment file"}, status=400)
+                    return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": "Empty attachment file"}).encode()
             except Exception as e:
-                self.send_json({"error": str(e)}, status=400)
-            return
+                return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": str(e)}).encode()
 
-        if path == "/api/delete-attachment":
-            AppRequestHandler.current_attachment = None
-            self.send_json({"success": True, "message": "Attachment detached."})
-            return
+        if clean_path == "/api/delete-attachment":
+            CURRENT_ATTACHMENT = None
+            return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"success": True, "message": "Attachment detached."}).encode()
 
-        if path == "/api/preview":
+        if clean_path == "/api/preview":
             try:
                 data = json.loads(body)
                 subject_tpl = data.get("subject", "")
                 body_tpl = data.get("body", "")
                 contacts = data.get("contacts", [])[:3]
-
                 previews = []
                 for c in contacts:
                     previews.append({
@@ -867,19 +823,18 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                         "subject": render_template(subject_tpl, c),
                         "body": render_template(body_tpl, c)
                     })
-                self.send_json({"previews": previews})
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"previews": previews}).encode()
             except Exception as e:
-                self.send_json({"error": str(e)}, status=400)
-            return
+                return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": str(e)}).encode()
 
-        if path == "/api/templates":
+        if clean_path == "/api/templates":
             try:
                 data = json.loads(body)
                 name = data.get("name", "").strip() or "Custom Template"
                 subject = data.get("subject", "")
                 body_content = data.get("body", "")
                 if not body_content:
-                    return self.send_json({"error": "Template body cannot be empty"}, status=400)
+                    return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": "Template body cannot be empty"}).encode()
 
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
@@ -887,13 +842,14 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 template_id = c.lastrowid
                 conn.commit()
                 conn.close()
-
-                self.send_json({"success": True, "template": {"id": template_id, "name": name, "subject": subject, "body": body_content, "is_default": False}})
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({
+                    "success": True,
+                    "template": {"id": template_id, "name": name, "subject": subject, "body": body_content, "is_default": False}
+                }).encode()
             except Exception as e:
-                self.send_json({"error": str(e)}, status=400)
-            return
+                return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": str(e)}).encode()
 
-        if path == "/api/delete-template":
+        if clean_path == "/api/delete-template":
             try:
                 data = json.loads(body)
                 template_id = data.get("id")
@@ -902,18 +858,16 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 c.execute("DELETE FROM templates WHERE id = ? AND is_default = 0", (template_id,))
                 conn.commit()
                 conn.close()
-                self.send_json({"success": True})
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"success": True}).encode()
             except Exception as e:
-                self.send_json({"error": str(e)}, status=400)
-            return
+                return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": str(e)}).encode()
 
-        if path == "/api/prepare-queue":
+        if clean_path == "/api/prepare-queue":
             try:
                 data = json.loads(body)
                 subject_tpl = data.get("subject", "")
                 body_tpl = data.get("body", "")
                 recipients = data.get("recipients", [])
-
                 queue = []
                 for idx, r in enumerate(recipients):
                     email = r.get("email", "").strip()
@@ -923,43 +877,36 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                     rendered_subj = render_template(subject_tpl, r)
                     rendered_body = render_template(body_tpl, r)
                     queue.append({
-                        "id": idx,
-                        "email": email,
-                        "name": name,
-                        "data": r,
-                        "subject": rendered_subj,
-                        "body": rendered_body,
-                        "status": "pending",  # 'approved', 'skipped', 'pending'
-                        "skipped": False,
-                        "edited": False
+                        "id": idx, "email": email, "name": name, "data": r,
+                        "subject": rendered_subj, "body": rendered_body,
+                        "status": "pending", "skipped": False, "edited": False
                     })
-                self.send_json({"queue": queue, "total": len(queue)})
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"queue": queue, "total": len(queue)}).encode()
             except Exception as e:
-                self.send_json({"error": str(e)}, status=400)
-            return
+                return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": str(e)}).encode()
 
-        if path == "/api/test-smtp":
+        if clean_path == "/api/test-smtp":
             try:
                 data = json.loads(body)
                 email = str(data.get("sender_email", "")).strip()
                 pw = str(data.get("app_password", "")).replace(" ", "").strip()
                 server = data.get("smtp_server", "smtp.gmail.com")
                 port = int(data.get("smtp_port", 465))
-
                 if not email or not pw:
-                    return self.send_json({"error": "Please enter both your Gmail address and 16-character App Password."}, status=400)
+                    return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": "Please enter both your Gmail address and 16-character App Password."}).encode()
 
                 test_smtp = smtplib.SMTP_SSL(server, port, timeout=12)
                 test_smtp.login(email, pw)
                 test_smtp.quit()
-                self.send_json({"success": True, "message": f"Successfully connected as {email}!"})
-            except smtplib.SMTPAuthenticationError as e:
-                self.send_json({"error": "Gmail authentication failed. Please make sure you are using a 16-character Gmail App Password (not your normal Google account password) with 2-Step Verification enabled."}, status=401)
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"success": True, "message": f"Successfully connected as {email}!"}).encode()
+            except smtplib.SMTPAuthenticationError:
+                return 401, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({
+                    "error": "Gmail authentication failed. Please make sure you are using a 16-character Gmail App Password (not your normal Google account password) with 2-Step Verification enabled."
+                }).encode()
             except Exception as e:
-                self.send_json({"error": f"Connection failed: {e}"}, status=400)
-            return
+                return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": f"Connection failed: {e}"}).encode()
 
-        if path == "/api/delete-campaign":
+        if clean_path == "/api/delete-campaign":
             try:
                 data = json.loads(body)
                 camp_id = data.get("id")
@@ -969,12 +916,11 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 c.execute("DELETE FROM campaigns WHERE id = ?", (camp_id,))
                 conn.commit()
                 conn.close()
-                self.send_json({"success": True})
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"success": True}).encode()
             except Exception as e:
-                self.send_json({"error": str(e)}, status=400)
-            return
+                return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": str(e)}).encode()
 
-        if path == "/api/send":
+        if clean_path == "/api/send":
             try:
                 data = json.loads(body)
                 title = data.get("title", f"Campaign {time.strftime('%Y-%m-%d %H:%M')}")
@@ -995,16 +941,15 @@ class AppRequestHandler(BaseHTTPRequestHandler):
                 dry_run = bool(dry_run_req) if dry_run_req is not None else cfg.get("dry_run", DRY_RUN)
 
                 if not recipients:
-                    return self.send_json({"error": "No recipients provided for campaign"}, status=400)
+                    return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": "No recipients provided for campaign"}).encode()
 
                 with manager.lock:
                     if manager.status["state"] == "sending":
-                        return self.send_json({"error": "A campaign is already running."}, status=400)
+                        return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": "A campaign is already running."}).encode()
 
-                # Create campaign entry in DB
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
-                att_name = AppRequestHandler.current_attachment.get("filename") if AppRequestHandler.current_attachment else ""
+                att_name = CURRENT_ATTACHMENT.get("filename") if CURRENT_ATTACHMENT else ""
                 c.execute("""
                 INSERT INTO campaigns (title, source_type, source_name, subject, body_template, attachment_name, total_recipients, sent_count, status)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'sending')
@@ -1017,24 +962,93 @@ class AppRequestHandler(BaseHTTPRequestHandler):
 
                 t = threading.Thread(
                     target=send_campaign_worker,
-                    args=(campaign_id, cfg, subject_tpl, body_tpl, recipients, AppRequestHandler.current_attachment, dry_run),
+                    args=(campaign_id, cfg, subject_tpl, body_tpl, recipients, CURRENT_ATTACHMENT, dry_run),
                     daemon=True
                 )
                 manager.active_thread = t
                 t.start()
 
-                self.send_json({"success": True, "campaign_id": campaign_id, "total": len(recipients)})
+                return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({
+                    "success": True, "campaign_id": campaign_id, "total": len(recipients)
+                }).encode()
             except Exception as e:
-                self.send_json({"error": str(e)}, status=400)
-            return
+                return 400, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": str(e)}).encode()
 
-        if path == "/api/stop":
+        if clean_path == "/api/stop":
             manager.request_stop()
-            self.send_json({"success": True, "message": "Stop signal sent."})
-            return
+            return 200, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"success": True, "message": "Stop signal sent."}).encode()
 
-        self.send_response(404)
-        self.end_headers()
+    return 404, [("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*")], json.dumps({"error": f"Path not found: {clean_path}"}).encode()
+
+
+# Native HTTP Server Handler (Local & Docker)
+class AppRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
+
+    def _dispatch(self):
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            method = self.command.upper()
+            content_length = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(content_length) if content_length > 0 else b""
+
+            status, headers, resp_body = dispatch_request(path, method, body)
+
+            self.send_response(status)
+            for k, v in headers:
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(resp_body)
+        except Exception as e:
+            import traceback
+            self.send_response(500)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(f"Server Error:\n{traceback.format_exc()}".encode())
+
+    def do_GET(self):
+        self._dispatch()
+
+    def do_POST(self):
+        self._dispatch()
+
+    def do_OPTIONS(self):
+        self._dispatch()
+
+
+# WSGI Application (Vercel Serverless, Gunicorn, uWSGI)
+def wsgi_app(environ, start_response):
+    try:
+        raw_path = environ.get("HTTP_X_MATCHED_PATH") or environ.get("HTTP_X_FORWARDED_URI") or environ.get("PATH_INFO") or "/"
+        parsed = urllib.parse.urlparse(raw_path)
+        path = parsed.path or "/"
+        method = environ.get("REQUEST_METHOD", "GET").upper()
+
+        try:
+            content_length = int(environ.get("CONTENT_LENGTH", 0) or 0)
+        except (ValueError, TypeError):
+            content_length = 0
+
+        body = environ["wsgi.input"].read(content_length) if content_length > 0 else b""
+        status, headers, resp_body = dispatch_request(path, method, body)
+
+        status_text = {
+            200: "200 OK",
+            400: "400 Bad Request",
+            401: "401 Unauthorized",
+            404: "404 Not Found",
+            500: "500 Internal Server Error"
+        }.get(status, f"{status} Response")
+
+        start_response(status_text, headers)
+        return [resp_body]
+    except Exception as e:
+        import traceback
+        err_bytes = f"WSGI Error:\n{traceback.format_exc()}".encode()
+        start_response("500 Internal Server Error", [("Content-Type", "text/plain; charset=utf-8")])
+        return [err_bytes]
 
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
@@ -1088,9 +1102,9 @@ def start_server(port=None, host=None, auto_open=True):
 # Vercel scans Python files for top-level "app", "application",
 # or "handler" (BaseHTTPRequestHandler subclass)
 # ============================================================
+app = wsgi_app
+application = wsgi_app
 handler = AppRequestHandler
-app = AppRequestHandler
-application = AppRequestHandler
 
 
 if __name__ == "__main__":
